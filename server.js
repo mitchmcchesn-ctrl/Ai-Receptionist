@@ -1,4 +1,4 @@
-// server.js — Clean Auto Detailing realtime voice receptionist (no bell loop)
+// server.js — Clean Auto Detailing realtime voice receptionist (fixed hangup)
 // Twilio Media Streams <-> OpenAI Realtime WebSocket
 
 import express from "express";
@@ -33,7 +33,7 @@ Behavior:
 - Never invent extra fees or unavailable services.
 `;
 
-// ========= 1) Twilio entrypoint: start media stream + clear start prompt =========
+// ========= 1) Twilio entrypoint: start media stream + keep call open =========
 app.all("/voice", (req, res) => {
   console.log(`${req.method} /voice hit`);
   const host = process.env.PUBLIC_HOST; // e.g. ai-receptionist-xxxx.onrender.com (NO https://)
@@ -46,7 +46,8 @@ app.all("/voice", (req, res) => {
     You’re connected to the Clean Auto Detailing virtual receptionist.
     You can start speaking now—tell me what you need: interior, exterior, paint correction, or ceramic coating.
   </Say>
-  <Pause length="1"/>
+  <!-- Keep the call open while the AI streams audio back -->
+  <Pause length="600"/>
 </Response>`;
   res.type("text/xml").send(twiml.trim());
 });
@@ -55,7 +56,6 @@ app.all("/voice", (req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 
 wss.on("connection", async (twilioWS) => {
-  // Connect to OpenAI Realtime WebSocket
   const oaUrl = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
   const OpenAIWS = (await import("ws")).WebSocket;
   const openaiWS = new OpenAIWS(oaUrl, {
@@ -66,17 +66,13 @@ wss.on("connection", async (twilioWS) => {
 
   openaiWS.on("open", () => {
     openaiReady = true;
-
-    // Set session (persona + optional voice)
     openaiWS.send(JSON.stringify({
       type: "session.update",
       session: {
         instructions: INSTRUCTIONS,
-        voice: process.env.REALTIME_VOICE || "alloy" // try other voices by setting env
+        voice: process.env.REALTIME_VOICE || "alloy"
       }
     }));
-
-    // Proactive greeting that invites speech immediately
     openaiWS.send(JSON.stringify({
       type: "response.create",
       response: {
@@ -86,34 +82,28 @@ wss.on("connection", async (twilioWS) => {
     }));
   });
 
-  openaiWS.on("close", () => {
-    try { twilioWS.close(); } catch {}
-  });
-
+  openaiWS.on("close", () => { try { twilioWS.close(); } catch {} });
   openaiWS.on("error", (e) => console.error("OpenAI WS error:", e?.message || e));
 
   // Caller audio from Twilio -> OpenAI input buffer
   twilioWS.on("message", (msg) => {
     try {
       const frame = JSON.parse(msg.toString());
-
       if (frame.event === "start") {
         console.log("Twilio stream started:", frame?.start?.streamSid);
       }
-
       if (frame.event === "media" && openaiReady) {
         openaiWS.send(JSON.stringify({
           type: "input_audio_buffer.append",
-          audio: frame.media.payload // base64 audio chunk
+          audio: frame.media.payload // base64 chunk
         }));
       }
-
       if (frame.event === "stop" && openaiReady) {
         openaiWS.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
         openaiWS.send(JSON.stringify({ type: "response.create" }));
       }
     } catch {
-      // Ignore non-JSON frames
+      // ignore non-JSON frames
     }
   });
 
@@ -121,19 +111,14 @@ wss.on("connection", async (twilioWS) => {
   openaiWS.on("message", (data) => {
     try {
       const evt = JSON.parse(data.toString());
-
       if (evt.type === "output_audio.delta" && evt.audio) {
         twilioWS.send(JSON.stringify({
           event: "media",
           media: { payload: evt.audio }
         }));
       }
-
-      if (evt.type === "response.completed") {
-        // Ready for more input; Twilio will keep streaming microphone audio.
-      }
     } catch {
-      // Ignore non-JSON events
+      // ignore
     }
   });
 
@@ -156,6 +141,6 @@ server.on("upgrade", (req, socket, head) => {
   }
 });
 
-// Simple health check
+// Health check
 app.get("/", (_, res) => res.send("OK"));
 
