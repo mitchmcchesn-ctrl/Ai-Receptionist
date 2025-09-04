@@ -1,4 +1,4 @@
-// server.js — Clean Auto Detailing realtime voice receptionist (fixed hangup)
+// server.js — Clean Auto Detailing realtime voice receptionist (short prompt)
 // Twilio Media Streams <-> OpenAI Realtime WebSocket
 
 import express from "express";
@@ -24,8 +24,8 @@ Business facts:
 - Policy: Please have the car emptied of personal belongings before the appointment.
 
 Behavior:
-- Start with a short greeting and an explicit question such as:
-  "How can I help with your detailing today—interior, exterior, or both?"
+- Start with a short greeting and a simple question like:
+  "How can I help you today?"
 - If asked: share hours, that we're mobile (we come to their driveway), services, and prices.
 - For booking: collect name, callback number, service address, vehicle (make/model/year),
   desired service(s), and preferred date/time; then confirm a human will text/call to finalize.
@@ -33,7 +33,7 @@ Behavior:
 - Never invent extra fees or unavailable services.
 `;
 
-// ========= 1) Twilio entrypoint: start media stream + keep call open =========
+// ========= 1) Twilio entrypoint: start media stream + short start prompt =========
 app.all("/voice", (req, res) => {
   console.log(`${req.method} /voice hit`);
   const host = process.env.PUBLIC_HOST; // e.g. ai-receptionist-xxxx.onrender.com (NO https://)
@@ -44,7 +44,7 @@ app.all("/voice", (req, res) => {
   </Start>
   <Say voice="Polly.Joanna">
     You’re connected to the Clean Auto Detailing virtual receptionist.
-    You can start speaking now—tell me what you need: interior, exterior, paint correction, or ceramic coating.
+    How can I help you today?
   </Say>
   <!-- Keep the call open while the AI streams audio back -->
   <Pause length="600"/>
@@ -76,8 +76,7 @@ wss.on("connection", async (twilioWS) => {
     openaiWS.send(JSON.stringify({
       type: "response.create",
       response: {
-        instructions:
-          "Greet briefly and ask: 'How can I help with your detailing today—interior, exterior, or both?'"
+        instructions: "Greet briefly and ask: 'How can I help you today?'"
       }
     }));
   });
