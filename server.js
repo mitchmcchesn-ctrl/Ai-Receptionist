@@ -1,4 +1,4 @@
-// server.js  (turn-based voice receptionist)
+// server.js — turn-based voice receptionist for Clean Aut Detailing
 import express from "express";
 import dotenv from "dotenv";
 dotenv.config();
@@ -7,16 +7,30 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ===== Helper: receptionist system instructions =====
+// ===================== Persona (your business) =====================
 const SYSTEM_PROMPT = `
-You are a friendly, concise phone receptionist for a small business.
-- Greet the caller and ask how you can help.
-- If they ask about hours, location, services, pricing: answer briefly.
-- If they want to book, ask for name, phone number, and preferred date/time.
-- Keep responses to 1–2 sentences. Be polite and efficient.
+You are the phone receptionist for **Clean Aut Detailing**.
+Tone: warm, clear, professional; keep replies to 1–2 sentences.
+
+Business facts (treat as true):
+- Service type: Mobile detailing — we come directly to the customer’s driveway.
+- Hours: Mon–Sat, 9:00 AM–5:00 PM
+- Booking: over the phone at 905-466-8506
+- Services: interior detail, exterior detail, paint correction, ceramic coating
+- Pricing: Interior+Exterior $240, Interior $190, Exterior $160
+- Policies: Please have the car emptied of personal belongings before your appointment.
+
+Call handling rules:
+1) Greet and offer help immediately. Example: “Thanks for calling Clean Aut Detailing—virtual receptionist here. How can I help today?”
+2) Answer FAQs using the facts above; never invent details beyond them.
+3) For booking: collect caller’s full name, callback number, address (for mobile service), vehicle (make/model/year), desired service(s), and preferred date/time. Offer first available if they’re flexible.
+4) Confirm price based on chosen service; mention any add-ons (paint correction, ceramic coating) are quoted after quick inspection.
+5) After collecting details, confirm back to the caller and say a human will text/call to finalize the slot.
+6) If a question isn’t covered, take a message (name, number, question) and promise a same-day callback during business hours.
+7) Always end with a next step: booking, sending confirmation, or taking a message.
 `;
 
-// ===== OpenAI helper (chat completion) =====
+// ===================== OpenAI helper =====================
 async function askOpenAI(message, context = []) {
   const body = {
     model: "gpt-4o-mini",
@@ -25,16 +39,16 @@ async function askOpenAI(message, context = []) {
       ...context,
       { role: "user", content: message }
     ],
-    temperature: 0.3,
+    temperature: 0.3
   };
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
+      "Content-Type": "application/json"
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(body)
   });
 
   if (!res.ok) {
@@ -47,30 +61,48 @@ async function askOpenAI(message, context = []) {
   return data.choices?.[0]?.message?.content?.trim() || "How can I help?";
 }
 
-// ===== 1) Entry: Twilio hits /voice at call start =====
-app.all("/voice", (req, res) => {
-  // Ask Twilio to gather speech and send it to /gather when done
-  const twiml = `
+// ===================== TwiML builders =====================
+function buildVoiceTwiml() {
+  return `
 <Response>
-  <Say voice="Polly.Joanna">Hello! This is the AI receptionist. How can I help you today?</Say>
+  <Say voice="Polly.Joanna">Hello! Thanks for calling Clean Aut Detailing. We’re mobile and come right to your driveway. How can I help you today?</Say>
   <Gather input="speech" action="/gather" method="POST" speechTimeout="auto" language="en-US">
     <Say voice="Polly.Joanna">I’m listening.</Say>
   </Gather>
   <Say voice="Polly.Joanna">I didn’t catch that. Let me try again.</Say>
   <Redirect method="POST">/voice</Redirect>
 </Response>`;
-  res.type("text/xml").send(twiml.trim());
+}
+
+function escapeXml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+// ===================== Routes =====================
+// Allow both GET (for browser check) and POST (Twilio) on /voice
+app.all("/voice", (req, res) => {
+  console.log(`${req.method} /voice hit`);
+  res.type("text/xml").send(buildVoiceTwiml().trim());
 });
 
-// ===== 2) Twilio sends us the caller's words here =====
+// Twilio posts the caller's speech transcript here
 app.post("/gather", async (req, res) => {
   const transcript = (req.body.SpeechResult || "").trim();
-  console.log("Caller said:", transcript);
+  console.log("Caller said:", transcript || "(no speech)");
 
-  // Ask OpenAI what to say back
-  const reply = await askOpenAI(transcript);
+  let reply;
+  try {
+    reply = await askOpenAI(transcript || "Caller was silent. Greet and ask how to help.");
+  } catch (e) {
+    console.error("AI call failed:", e);
+    reply = "Our hours are Monday to Saturday, nine to five. Would you like to book an appointment?";
+  }
 
-  // Speak reply, then continue the conversation by gathering again
   const twiml = `
 <Response>
   <Say voice="Polly.Joanna">${escapeXml(reply)}</Say>
@@ -83,15 +115,12 @@ app.post("/gather", async (req, res) => {
   res.type("text/xml").send(twiml.trim());
 });
 
-// Small XML escaper so special characters don't break <Say>
-function escapeXml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
+// Health/debug route (safe)
+app.get("/debug", (req, res) => {
+  const k = process.env.OPENAI_API_KEY || "";
+  res.json({ hasKey: Boolean(k && k.startsWith("sk-")), prefix: k ? k.slice(0, 3) : null, length: k ? k.length : 0 });
+});
 
+// ===================== Start server =====================
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server listening on port ${port}`));
