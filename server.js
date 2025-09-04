@@ -1,4 +1,4 @@
-// server.js — Clean Auto Detailing realtime voice receptionist
+// server.js — Clean Auto Detailing realtime voice receptionist (no bell loop)
 // Twilio Media Streams <-> OpenAI Realtime WebSocket
 
 import express from "express";
@@ -33,8 +33,9 @@ Behavior:
 - Never invent extra fees or unavailable services.
 `;
 
-// ========= 1) Twilio entrypoint: start media stream + clear prompt =========
+// ========= 1) Twilio entrypoint: start media stream + clear start prompt =========
 app.all("/voice", (req, res) => {
+  console.log(`${req.method} /voice hit`);
   const host = process.env.PUBLIC_HOST; // e.g. ai-receptionist-xxxx.onrender.com (NO https://)
   const twiml = `
 <Response>
@@ -43,9 +44,8 @@ app.all("/voice", (req, res) => {
   </Start>
   <Say voice="Polly.Joanna">
     You’re connected to the Clean Auto Detailing virtual receptionist.
-    After the beep, tell me what you need—interior, exterior, paint correction, or ceramic coating.
+    You can start speaking now—tell me what you need: interior, exterior, paint correction, or ceramic coating.
   </Say>
-  <Play>https://api.twilio.com/cowbell.mp3</Play>
   <Pause length="1"/>
 </Response>`;
   res.type("text/xml").send(twiml.trim());
@@ -72,8 +72,7 @@ wss.on("connection", async (twilioWS) => {
       type: "session.update",
       session: {
         instructions: INSTRUCTIONS,
-        // Try another voice by setting env REALTIME_VOICE in Render (e.g., "verse")
-        voice: process.env.REALTIME_VOICE || "alloy"
+        voice: process.env.REALTIME_VOICE || "alloy" // try other voices by setting env
       }
     }));
 
@@ -103,20 +102,18 @@ wss.on("connection", async (twilioWS) => {
       }
 
       if (frame.event === "media" && openaiReady) {
-        // frame.media.payload is base64-encoded audio from Twilio
         openaiWS.send(JSON.stringify({
           type: "input_audio_buffer.append",
-          audio: frame.media.payload
+          audio: frame.media.payload // base64 audio chunk
         }));
       }
 
       if (frame.event === "stop" && openaiReady) {
-        // Caller paused; ask OpenAI to respond
         openaiWS.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
         openaiWS.send(JSON.stringify({ type: "response.create" }));
       }
     } catch {
-      // Non-JSON frames can be ignored
+      // Ignore non-JSON frames
     }
   });
 
@@ -125,7 +122,6 @@ wss.on("connection", async (twilioWS) => {
     try {
       const evt = JSON.parse(data.toString());
 
-      // Realtime streams audio chunks as output_audio.delta (base64)
       if (evt.type === "output_audio.delta" && evt.audio) {
         twilioWS.send(JSON.stringify({
           event: "media",
