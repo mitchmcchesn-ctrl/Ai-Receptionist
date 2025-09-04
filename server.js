@@ -48,7 +48,7 @@ async function askOpenAI(message, context = []) {
 }
 
 // ===== 1) Entry: Twilio hits /voice at call start =====
-app.post("/voice", (req, res) => {
+app.all("/voice", (req, res) => {
   // Ask Twilio to gather speech and send it to /gather when done
   const twiml = `
 <Response>
