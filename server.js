@@ -1,4 +1,4 @@
-// server.js — Clean Auto Detailing realtime voice receptionist (short prompt)
+// server.js — Clean Auto Detailing realtime voice receptionist (silence detection)
 // Twilio Media Streams <-> OpenAI Realtime WebSocket
 
 import express from "express";
@@ -24,8 +24,7 @@ Business facts:
 - Policy: Please have the car emptied of personal belongings before the appointment.
 
 Behavior:
-- Start with a short greeting and a simple question like:
-  "How can I help you today?"
+- Start with a short greeting and a simple question like: "How can I help you today?"
 - If asked: share hours, that we're mobile (we come to their driveway), services, and prices.
 - For booking: collect name, callback number, service address, vehicle (make/model/year),
   desired service(s), and preferred date/time; then confirm a human will text/call to finalize.
@@ -52,7 +51,7 @@ app.all("/voice", (req, res) => {
   res.type("text/xml").send(twiml.trim());
 });
 
-// ========= 2) WebSocket bridge: Twilio <-> OpenAI Realtime =========
+// ========= 2) WebSocket bridge: Twilio <-> OpenAI Realtime (+silence detector) =========
 const wss = new WebSocketServer({ noServer: true });
 
 wss.on("connection", async (twilioWS) => {
@@ -63,6 +62,11 @@ wss.on("connection", async (twilioWS) => {
   });
 
   let openaiReady = false;
+  let lastMediaAt = 0;
+  let hasBuffered = false;
+
+  // Commit after ~900ms of silence
+  const SILENCE_MS = 900;
 
   openaiWS.on("open", () => {
     openaiReady = true;
@@ -73,34 +77,54 @@ wss.on("connection", async (twilioWS) => {
         voice: process.env.REALTIME_VOICE || "alloy"
       }
     }));
+    // Proactive greeting (AI voice)
     openaiWS.send(JSON.stringify({
       type: "response.create",
-      response: {
-        instructions: "Greet briefly and ask: 'How can I help you today?'"
-      }
+      response: { instructions: "Greet briefly and ask: 'How can I help you today?'" }
     }));
   });
 
   openaiWS.on("close", () => { try { twilioWS.close(); } catch {} });
   openaiWS.on("error", (e) => console.error("OpenAI WS error:", e?.message || e));
 
+  // Silence timer: check every 200ms
+  const interval = setInterval(() => {
+    if (!openaiReady) return;
+    if (!hasBuffered) return;
+    const now = Date.now();
+    if (now - lastMediaAt > SILENCE_MS) {
+      // We consider the user finished speaking → ask OpenAI to respond
+      try {
+        openaiWS.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        openaiWS.send(JSON.stringify({ type: "response.create" }));
+        hasBuffered = false; // reset until we get new audio
+      } catch (e) {
+        console.error("Commit/create error:", e?.message || e);
+      }
+    }
+  }, 200);
+
   // Caller audio from Twilio -> OpenAI input buffer
   twilioWS.on("message", (msg) => {
     try {
       const frame = JSON.parse(msg.toString());
+
       if (frame.event === "start") {
         console.log("Twilio stream started:", frame?.start?.streamSid);
+        lastMediaAt = Date.now();
       }
+
       if (frame.event === "media" && openaiReady) {
+        // Each chunk is base64 audio
         openaiWS.send(JSON.stringify({
           type: "input_audio_buffer.append",
-          audio: frame.media.payload // base64 chunk
+          audio: frame.media.payload
         }));
+        hasBuffered = true;
+        lastMediaAt = Date.now();
       }
-      if (frame.event === "stop" && openaiReady) {
-        openaiWS.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-        openaiWS.send(JSON.stringify({ type: "response.create" }));
-      }
+
+      // We NO LONGER wait for frame.event === "stop" (that's call end)
     } catch {
       // ignore non-JSON frames
     }
@@ -116,12 +140,14 @@ wss.on("connection", async (twilioWS) => {
           media: { payload: evt.audio }
         }));
       }
+      // When the AI finishes, we just keep listening; the silence timer will handle next turns.
     } catch {
-      // ignore
+      // ignore non-JSON
     }
   });
 
   twilioWS.on("close", () => {
+    clearInterval(interval);
     try { openaiWS.close(); } catch {}
     console.log("Twilio stream closed");
   });
@@ -142,4 +168,5 @@ server.on("upgrade", (req, socket, head) => {
 
 // Health check
 app.get("/", (_, res) => res.send("OK"));
+
 
